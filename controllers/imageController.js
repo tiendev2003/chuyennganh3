@@ -2,6 +2,11 @@ const { ProductImage, Product } = require("../models");
 const { Op } = require("sequelize");
 const fs = require("fs");
 const path = require("path");
+const sharp = require("sharp");
+const { pipeline } = require("@xenova/transformers");
+const { QdrantClient } = require("@qdrant/js-client-rest");
+const { deleteFile } = require("../utils/fileUpload");
+require("dotenv").config();
 exports.getAllImages = async (req, res) => {
   try {
     const images = await ProductImage.findAll();
@@ -74,4 +79,42 @@ const getAllFiles = (dirPath, arrayOfFiles = []) => {
     }
   });
   return arrayOfFiles;
+};
+
+exports.searchImage = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "Image is required" });
+    }
+    const featureExtractor = await pipeline(
+      "image-feature-extraction",
+      "Xenova/clip-vit-base-patch32",
+    );
+    const output = await featureExtractor(req.file.path);
+    const embedding = Array.from(output.data);
+
+    const client = new QdrantClient({
+      url: process.env.QDRANT_HOST,
+      apiKey: process.env.QDRANT_API_KEY,
+    });
+    const results = await client.search(process.env.QDRANT_COLLECTION_NAME, {
+      vector: embedding,
+      limit: 10,
+    });
+
+    const formattedResults = results.map((hit) => ({
+      product_id: hit.payload.product_id,
+      image_url: hit.payload.image_url,
+      name: hit.payload.name,
+      slug: hit.payload.slug || "",
+      score: hit.score,
+    }));
+    deleteFile(req.file.path);
+
+    res.json(formattedResults);
+  } catch (error) {
+    console.log(error);
+    deleteFile(req.file.path);
+    res.status(500).json({ message: error.message });
+  }
 };
